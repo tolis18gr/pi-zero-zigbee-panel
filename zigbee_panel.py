@@ -460,7 +460,8 @@ class App:
             a = max(5, S(8))
             pygame.draw.polygon(s, AMBER, [(x0 + a, cy - a), (x0, cy), (x0 + a, cy + a)])
             pygame.draw.line(s, AMBER, (x0, cy), (x0 + 2 * a + 2, cy), 3)
-            self.hits.append((pygame.Rect(0, 0, hh + S(30), hh), self.back))
+            # όλο το αριστερό μέρος της κεφαλίδας είναι «πίσω» (η γωνία πιάνει δύσκολα)
+            self.hits.append((pygame.Rect(0, 0, int(W * 0.6), hh + S(6)), self.back))
             x0 += 2 * a + S(14)
         rr = text(s, right or time.strftime("%H:%M"), (W - S(12), cy), 15, MUTED, anchor="midright")
         if dot is not None:
@@ -935,6 +936,13 @@ def main():
 
     def on_up(pos):
         nonlocal dirty
+        if st["down"]:
+            dx, dy = pos[0] - st["down"][0], pos[1] - st["down"][1]
+            if dx > W // 4 and abs(dy) < dx / 2:   # σύρσιμο προς τα δεξιά = πίσω
+                app.back()
+                st.update(down=None, drag=False)
+                dirty = True
+                return
         if st["down"] and not st["drag"]:
             app.tap(pos)
         st.update(down=None, drag=False)
