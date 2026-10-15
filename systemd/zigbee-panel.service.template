@@ -1,0 +1,15 @@
+[Unit]
+Description=Zigbee Panel (οθόνη 3.5")
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+WorkingDirectory=__DIR__
+EnvironmentFile=__DIR__/panel.env
+ExecStart=/usr/bin/python3 __DIR__/zigbee_panel.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
