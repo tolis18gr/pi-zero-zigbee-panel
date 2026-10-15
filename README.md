@@ -1,6 +1,6 @@
 # Zigbee Panel
 
-Οθόνη πληροφοριών για Raspberry Pi Zero W με οθόνη αφής 3.5" (480×320).
+Οθόνη πληροφοριών για Raspberry Pi Zero W με οθόνη αφής 3.2" SPI (320×240, Waveshare ILI9341 / XPT2046).
 Δείχνει CPU, RAM, θερμοκρασία, διεργασίες και τις συσκευές Zigbee από το Zigbee2MQTT.
 
 ![Οθόνες](docs/preview.png)
@@ -14,7 +14,13 @@ cd zigbee-panel
 ./install.sh
 ```
 
-Οι ρυθμίσεις (MQTT host, κωδικοί) είναι στο `panel.env`, που δεν ανεβαίνει στο GitHub.
+Το `install.sh` προσθέτει τον driver της οθόνης στο `config.txt`. Μετά το reboot:
+
+```bash
+./calibrate.sh     # πατάς τρεις σταυρούς για να ευθυγραμμιστεί η αφή
+```
+
+Οι ρυθμίσεις (MQTT, οθόνη, αφή) είναι στο `panel.env`, που δεν ανεβαίνει στο GitHub.
 
 ## Ενημέρωση
 
@@ -27,6 +33,8 @@ cd zigbee-panel
 | Τι | Εντολή |
 |---|---|
 | Δοκιμή χωρίς Zigbee | `PANEL_DEMO=1 python3 zigbee_panel.py` |
+| Δοκιμή στον υπολογιστή (παράθυρο) | `PANEL_DEMO=1 PANEL_OUTPUT=sdl PANEL_FULLSCREEN=0 python3 zigbee_panel.py` |
+| Βαθμονόμηση αφής | `./calibrate.sh` |
 | Logs | `journalctl -u zigbee-panel -f` |
 | Επανεκκίνηση | `sudo systemctl restart zigbee-panel` |
 

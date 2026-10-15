@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Zigbee Panel - μικρή οθόνη πληροφοριών για Raspberry Pi Zero W (οθόνη αφής 3.5", 480x320)
+Zigbee Panel - μικρή οθόνη πληροφοριών για Raspberry Pi Zero W (οθόνη αφής 3.2", 320x240)
 
 Οθόνες:
   Αρχική      -> CPU, RAM, πλήθος συσκευών Zigbee, θερμοκρασία, uptime, IP
@@ -35,12 +35,31 @@ CONFIG = {
     "mqtt_user": os.getenv("PANEL_MQTT_USER", ""),
     "mqtt_pass": os.getenv("PANEL_MQTT_PASS", ""),
     "base_topic": os.getenv("PANEL_BASE_TOPIC", "zigbee2mqtt"),
-    "width": int(os.getenv("PANEL_WIDTH", "480")),
-    "height": int(os.getenv("PANEL_HEIGHT", "320")),
+    "width": int(os.getenv("PANEL_WIDTH", "320")),
+    "height": int(os.getenv("PANEL_HEIGHT", "240")),
     "fullscreen": os.getenv("PANEL_FULLSCREEN", "1") == "1",
     "demo": os.getenv("PANEL_DEMO", "0") == "1",
+    # "fb": γράφει απευθείας στο framebuffer (οθόνες SPI στις GPIO), "sdl": παράθυρο / HDMI
+    "output": os.getenv("PANEL_OUTPUT", "fb"),
+    "fbdev": os.getenv("PANEL_FB", "/dev/fb1"),
+    # Βαθμονόμηση αφής (γράφεται αυτόματα από: python3 zigbee_panel.py --calibrate)
+    "touch_swap": os.getenv("PANEL_TOUCH_SWAP", "0") == "1",
+    "touch_x_min": float(os.getenv("PANEL_TOUCH_X_MIN", "0")),
+    "touch_x_max": float(os.getenv("PANEL_TOUCH_X_MAX", "4095")),
+    "touch_y_min": float(os.getenv("PANEL_TOUCH_Y_MIN", "0")),
+    "touch_y_max": float(os.getenv("PANEL_TOUCH_Y_MAX", "4095")),
 }
 W, H = CONFIG["width"], CONFIG["height"]
+K = min(W / 480, H / 320)        # κλίμακα γεωμετρίας (σχεδιασμένο αρχικά για 480x320)
+KF = (K + 1) / 2                 # τα γράμματα μικραίνουν λιγότερο, για να διαβάζονται
+
+
+def S(n):
+    return int(round(n * K))
+
+
+def F(n):
+    return max(11, int(round(n * KF)))
 
 # ---------------------------------------------------------------- ΧΡΩΜΑΤΑ
 BG = (16, 25, 36)
@@ -71,7 +90,7 @@ def font(size, bold=False):
 
 
 def text(surf, s, pos, size=15, color=TEXT, bold=False, anchor="topleft", maxw=None):
-    f = font(size, bold)
+    f = font(F(size), bold)
     s = str(s)
     if maxw and f.size(s)[0] > maxw:
         while s and f.size(s + "…")[0] > maxw:
@@ -336,10 +355,9 @@ def bar(surf, rect, frac, color):
 
 
 class App:
-    HEADER = 40
-
     def __init__(self, screen):
         self.screen = screen
+        self.HEADER = max(26, S(40))
         self.sys = SysStats()
         self.zb = Zigbee(CONFIG)
         self.zb.start()
@@ -396,108 +414,115 @@ class App:
         self.hits = []
         self.screen.fill(BG)
         getattr(self, f"draw_{self.view}")()
-        pygame.display.flip()
 
-    def header(self, title, back=True, right=None):
-        s = self.screen
+    def header(self, title, back=True, right=None, dot=None):
+        s, hh = self.screen, self.HEADER
+        cy = hh // 2
+        x0 = S(14)
         if back:
-            r = pygame.Rect(0, 0, 56, self.HEADER)
-            pygame.draw.polygon(s, AMBER, [(24, 12), (14, 20), (24, 28)])
-            pygame.draw.line(s, AMBER, (14, 20), (34, 20), 3)
-            self.hits.append((r, self.back))
-            text(s, title, (52, self.HEADER // 2), 18, TEXT, True, "midleft")
-        else:
-            text(s, title, (14, self.HEADER // 2), 18, TEXT, True, "midleft")
-        text(s, right or time.strftime("%H:%M"), (W - 12, self.HEADER // 2), 15, MUTED, anchor="midright")
-        pygame.draw.line(s, TRACK, (0, self.HEADER - 1), (W, self.HEADER - 1))
+            a = max(5, S(8))
+            pygame.draw.polygon(s, AMBER, [(x0 + a, cy - a), (x0, cy), (x0 + a, cy + a)])
+            pygame.draw.line(s, AMBER, (x0, cy), (x0 + 2 * a + 2, cy), 3)
+            self.hits.append((pygame.Rect(0, 0, hh + S(30), hh), self.back))
+            x0 += 2 * a + S(14)
+        rr = text(s, right or time.strftime("%H:%M"), (W - S(12), cy), 15, MUTED, anchor="midright")
+        if dot is not None:
+            pygame.draw.circle(s, dot, (rr.left - S(12), cy), max(3, S(5)))
+            rr.left -= S(20)
+        text(s, title, (x0, cy), 18, TEXT, True, "midleft", maxw=rr.left - x0 - S(10))
+        pygame.draw.line(s, TRACK, (0, hh - 1), (W, hh - 1))
+
+    def _card(self, r, label):
+        pygame.draw.rect(self.screen, CARD, r, border_radius=S(10))
+        text(self.screen, label, (r.x + S(12), r.y + S(8)), 15, MUTED)
 
     def draw_home(self):
         s = self.screen
-        self.header(socket.gethostname(), back=False)
-        top, ch = self.HEADER + 10, 200
-        gap = 8
+        ok = self.zb.mqtt_ok and self.zb.bridge != "offline"
+        self.header(socket.gethostname(), back=False, dot=GREEN if ok else RED)
+        gap = max(5, S(8))
+        top = self.HEADER + gap
+        stat_h = max(40, S(56))
+        ch = H - top - stat_h - 2 * gap
         cw = (W - gap * 4) // 3
         devs = self.zb.snapshot()
+        rad = min(cw // 2 - S(14), int(ch * 0.27))
+        thick = max(6, S(10))
+        ring_cy = top + int(ch * 0.50)
 
-        # CPU
-        r = pygame.Rect(gap, top, cw, ch)
-        pygame.draw.rect(s, CARD, r, border_radius=10)
-        text(s, "CPU", (r.x + 12, r.y + 10), 15, MUTED)
-        c = (r.centerx, r.y + 104)
-        ring(s, c, 52, 10, self.sys.cpu, level_color(self.sys.cpu))
-        text(s, f"{self.sys.cpu:.0f}%", c, 24, TEXT, True, "center")
-        text(s, "διεργασίες", (r.centerx, r.bottom - 16), 13, AMBER, anchor="center")
-        self.hits.append((r, lambda: self.go("procs")))
+        for i, (label, pct, foot, fcol, target) in enumerate([
+            ("CPU", self.sys.cpu, "διεργασίες", AMBER, "procs"),
+            ("RAM", self.sys.ram,
+             f"{self.sys.ram_used / 1048576:.0f}/{self.sys.ram_total / 1048576:.0f} MB", MUTED, None),
+        ]):
+            r = pygame.Rect(gap + i * (cw + gap), top, cw, ch)
+            self._card(r, label)
+            c = (r.centerx, ring_cy)
+            ring(s, c, rad, thick, pct, level_color(pct))
+            text(s, f"{pct:.0f}%", c, 22, TEXT, True, "center")
+            text(s, foot, (r.centerx, r.bottom - S(14)), 13, fcol, anchor="center", maxw=cw - 6)
+            if target:
+                self.hits.append((r, lambda t=target: self.go(t)))
 
-        # RAM
-        r = pygame.Rect(gap * 2 + cw, top, cw, ch)
-        pygame.draw.rect(s, CARD, r, border_radius=10)
-        text(s, "RAM", (r.x + 12, r.y + 10), 15, MUTED)
-        c = (r.centerx, r.y + 104)
-        ring(s, c, 52, 10, self.sys.ram, level_color(self.sys.ram))
-        text(s, f"{self.sys.ram:.0f}%", c, 24, TEXT, True, "center")
-        mb = lambda b: f"{b / 1048576:.0f}"
-        text(s, f"{mb(self.sys.ram_used)} / {mb(self.sys.ram_total)} MB",
-             (r.centerx, r.bottom - 16), 13, MUTED, anchor="center")
-
-        # Συσκευές
         r = pygame.Rect(gap * 3 + cw * 2, top, cw, ch)
-        pygame.draw.rect(s, CARD, r, border_radius=10)
-        text(s, "Zigbee", (r.x + 12, r.y + 10), 15, MUTED)
-        text(s, str(len(devs)), (r.centerx, r.y + 92), 56, TEXT, True, "center")
-        text(s, "συσκευές", (r.centerx, r.y + 132), 14, MUTED, anchor="center")
+        self._card(r, "Zigbee")
+        nr = text(s, str(len(devs)), (r.centerx, ring_cy - S(8)), 52, TEXT, True, "center")
         online = sum(1 for d in devs if d["avail"] == "online")
-        known = sum(1 for d in devs if d["avail"] is not None)
-        if known:
-            text(s, f"{online} online", (r.centerx, r.y + 152), 13, GREEN, anchor="center")
-        text(s, "λίστα", (r.centerx, r.bottom - 16), 13, AMBER, anchor="center")
+        known = any(d["avail"] is not None for d in devs)
+        sub, col = (f"{online} online", GREEN) if known else ("συσκευές", MUTED)
+        text(s, sub, (r.centerx, nr.bottom + S(6)), 13, col, anchor="midtop")
+        text(s, "λίστα", (r.centerx, r.bottom - S(14)), 13, AMBER, anchor="center")
         self.hits.append((r, lambda: self.go("devices")))
 
-        # Γραμμή κατάστασης
-        y = top + ch + 12
-        bh = H - y - 8
-        br = pygame.Rect(gap, y, W - gap * 2, bh)
-        pygame.draw.rect(s, CARD, br, border_radius=10)
-        cy = br.centery
+        # γραμμή κατάστασης: τρεις στήλες, ετικέτα πάνω και τιμή κάτω
+        br = pygame.Rect(gap, H - gap - stat_h, W - 2 * gap, stat_h)
+        pygame.draw.rect(s, CARD, br, border_radius=S(10))
         t = self.sys.temp
         items = [
-            ("Θερμ.", f"{t:.0f}°C" if t is not None else "—", level_color((t or 0) * 1.25)),
-            ("Ενεργό", fmt_uptime(self.sys.uptime), TEXT),
+            ("Θερμοκρασία", f"{t:.0f}°C" if t is not None else "—", level_color((t or 0) * 1.25)),
+            ("Σε λειτουργία", fmt_uptime(self.sys.uptime), TEXT),
             ("IP", self.sys.ip, TEXT),
         ]
-        x = br.x + 12
-        for label, val, col in items:
-            lr = text(s, label, (x, cy), 13, MUTED, anchor="midleft")
-            vr = text(s, val, (lr.right + 6, cy), 14, col, True, "midleft")
-            x = vr.right + 16
-        ok = self.zb.mqtt_ok and self.zb.bridge != "offline"
-        pygame.draw.circle(s, GREEN if ok else RED, (br.right - 14, cy), 5)
+        colw = [0.28, 0.32, 0.40]
+        x = br.x + S(12)
+        for (label, val, c), fr in zip(items, colw):
+            w = int((br.width - S(12)) * fr) - S(6)
+            text(s, label, (x, br.y + S(8)), 12, MUTED, maxw=w)
+            text(s, val, (x, br.bottom - S(8)), 14, c, True, "bottomleft", maxw=w)
+            x += w + S(6)
 
     def draw_procs(self):
         s = self.screen
         procs = self.sys.procs
-        self.header("Διεργασίες", right=f"{len(procs)} συνολικά")
-        y0 = self.HEADER + 4
-        cols = [(14, "Όνομα"), (260, "PID"), (340, "CPU"), (412, "RAM")]
-        for x, label in cols:
-            text(s, label, (x, y0 + 4), 13, MUTED)
-        list_top = y0 + 26
-        row_h = 30
+        self.header("Διεργασίες", right=f"{len(procs)}")
+        show_pid = W >= 400
+        x_cpu, x_ram = W - S(90), W - S(16)
+        cols = [(S(14), "Όνομα", "topleft")]
+        if show_pid:
+            cols.append((W - S(220), "PID", "topleft"))
+        cols += [(x_cpu, "CPU", "topright"), (x_ram, "RAM", "topright")]
+        y0 = self.HEADER + S(6)
+        for x, label, anc in cols:
+            text(s, label, (x, y0), 12, MUTED, anchor=anc)
+        list_top = y0 + F(12) + S(10)
+        row_h = max(22, S(30))
         area = pygame.Rect(0, list_top, W, H - list_top)
         self.max_scroll = max(0, len(procs) * row_h - area.height)
+        name_w = (W - S(220) if show_pid else x_cpu - F(14) * 4) - S(20)
         s.set_clip(area)
         for i, p in enumerate(procs):
             y = list_top + i * row_h - self.scroll
             if y + row_h < list_top or y > H:
                 continue
             if i % 2 == 0:
-                pygame.draw.rect(s, CARD, (6, y, W - 12, row_h - 2), border_radius=6)
+                pygame.draw.rect(s, CARD, (S(6), y, W - S(12), row_h - 2), border_radius=S(6))
             cy = y + row_h // 2 - 1
-            text(s, p["name"], (14, cy), 14, TEXT, anchor="midleft", maxw=236)
-            text(s, p["pid"], (260, cy), 13, MUTED, anchor="midleft")
-            text(s, f"{p['cpu']:.1f}%", (390, cy), 14, level_color(p["cpu"]) if p["cpu"] > 1 else TEXT,
-                 anchor="midright")
-            text(s, f"{p['mem']:.1f}%", (466, cy), 14, TEXT, anchor="midright")
+            text(s, p["name"], (S(14), cy), 14, TEXT, anchor="midleft", maxw=name_w)
+            if show_pid:
+                text(s, p["pid"], (W - S(220), cy), 13, MUTED, anchor="midleft")
+            text(s, f"{p['cpu']:.1f}%", (x_cpu, cy), 14,
+                 level_color(p["cpu"]) if p["cpu"] > 1 else TEXT, anchor="midright")
+            text(s, f"{p['mem']:.1f}%", (x_ram, cy), 14, TEXT, anchor="midright")
         s.set_clip(None)
         self._scrollbar(area, len(procs) * row_h)
 
@@ -505,38 +530,39 @@ class App:
         s = self.screen
         devs = self.zb.snapshot()
         self.header("Συσκευές Zigbee", right=f"{len(devs)}")
-        list_top = self.HEADER + 6
-        row_h = 56
+        list_top = self.HEADER + S(6)
+        row_h = max(42, S(56))
         area = pygame.Rect(0, list_top, W, H - list_top)
         if not devs:
-            text(s, "Δεν βρέθηκαν συσκευές", (W // 2, H // 2 - 10), 17, TEXT, anchor="center")
-            text(s, f"{self.zb.status_msg} · {CONFIG['mqtt_host']}", (W // 2, H // 2 + 16), 13, MUTED,
-                 anchor="center")
+            text(s, "Δεν βρέθηκαν συσκευές", (W // 2, H // 2 - S(10)), 16, TEXT, anchor="center")
+            text(s, f"{self.zb.status_msg} ({CONFIG['mqtt_host']})", (W // 2, H // 2 + S(18)), 12,
+                 MUTED, anchor="center", maxw=W - 20)
             return
         self.max_scroll = max(0, len(devs) * row_h - area.height)
         s.set_clip(area)
+        right_w = max(80, S(120))
         for i, d in enumerate(devs):
             y = list_top + i * row_h - self.scroll
             if y + row_h < list_top or y > H:
                 continue
-            r = pygame.Rect(6, y, W - 12, row_h - 6)
-            pygame.draw.rect(s, CARD, r, border_radius=8)
+            r = pygame.Rect(S(6), y, W - S(12), row_h - S(6))
+            pygame.draw.rect(s, CARD, r, border_radius=S(8))
             dot = GREEN if d["avail"] == "online" else RED if d["avail"] == "offline" else MUTED
-            pygame.draw.circle(s, dot, (r.x + 14, r.y + 16), 4)
-            text(s, d["name"], (r.x + 26, r.y + 7), 15, TEXT, True, maxw=280)
+            lx = r.x + S(24)
+            name_r = text(s, d["name"], (lx, r.y + S(6)), 15, TEXT, True, maxw=r.width - right_w - S(30))
+            pygame.draw.circle(s, dot, (r.x + S(12), name_r.centery), max(3, S(4)))
             sub = d["ieee"]
             if d["battery"] is not None:
-                sub += f"   μπατ. {d['battery']}%"
+                sub += f"  {d['battery']}%"
             elif d["type"] == "Router":
-                sub += "   router"
-            text(s, sub, (r.x + 26, r.y + 28), 12, MUTED, maxw=290)
-            # σήμα
+                sub += "  router"
+            text(s, sub, (lx, r.bottom - S(6)), 12, MUTED, anchor="bottomleft", maxw=r.width - right_w - S(10))
             lqi = d["lqi"]
-            bx = r.right - 120
-            bar(s, (bx, r.y + 12, 70, 8), (lqi or 0) / 255, lqi_color(lqi))
-            text(s, lqi if lqi is not None else "—", (r.right - 12, r.y + 16), 14, lqi_color(lqi), True,
-                 "midright")
-            text(s, ago(d["last_seen"]), (r.right - 12, r.y + 34), 12, MUTED, anchor="midright")
+            num = text(s, lqi if lqi is not None else "—", (r.right - S(10), name_r.centery), 14,
+                       lqi_color(lqi), True, "midright")
+            bw = right_w - num.width - S(16)
+            bar(s, (num.left - S(8) - bw, num.centery - S(4), bw, max(5, S(8))), (lqi or 0) / 255, lqi_color(lqi))
+            text(s, ago(d["last_seen"]), (r.right - S(10), r.bottom - S(6)), 12, MUTED, anchor="bottomright")
             name = d["name"]
             self.hits.append((r.clip(area), lambda n=name: self._open(n)))
         s.set_clip(None)
@@ -551,18 +577,18 @@ class App:
         d = next((x for x in self.zb.snapshot() if x["name"] == self.selected), None)
         if not d:
             self.header("Συσκευή")
-            text(s, "Η συσκευή δεν υπάρχει πια", (W // 2, H // 2), 16, MUTED, anchor="center")
+            text(s, "Η συσκευή δεν υπάρχει πια", (W // 2, H // 2), 15, MUTED, anchor="center")
             return
         self.header(d["name"])
         lqi = d["lqi"]
         nwk = f"0x{d['nwk']:04X}" if isinstance(d["nwk"], int) else "—"
         rows = [
-            ("Ισχύς σήματος (LQI)", f"{lqi} / 255" if lqi is not None else "—", lqi_color(lqi)),
-            ("Τελευταία επικοινωνία", ago(d["last_seen"]), TEXT),
+            ("Σήμα (LQI)", f"{lqi} / 255" if lqi is not None else "—", lqi_color(lqi)),
+            ("Τελ. επικοινωνία", ago(d["last_seen"]), TEXT),
             ("Κατάσταση", {"online": "Online", "offline": "Offline"}.get(d["avail"], "Άγνωστη"),
              GREEN if d["avail"] == "online" else RED if d["avail"] == "offline" else MUTED),
             ("IEEE (MAC)", d["ieee"], TEXT),
-            ("Διεύθυνση δικτύου", nwk, TEXT),
+            ("Διεύθ. δικτύου", nwk, TEXT),
             ("Τύπος", {"EndDevice": "Τελική συσκευή", "Router": "Router"}.get(d["type"], d["type"]), TEXT),
             ("Τροφοδοσία", "Μπαταρία" if d["power"] == "Battery" else "Ρεύμα" if "Mains" in str(d["power"])
              else d["power"], TEXT),
@@ -575,69 +601,271 @@ class App:
             if k not in skip and not isinstance(v, (dict, list)):
                 rows.append((k, v, BLUE))
 
-        top = self.HEADER + 4
-        row_h = 30
+        top = self.HEADER + S(4)
+        row_h = max(22, S(30))
         area = pygame.Rect(0, top, W, H - top)
         self.max_scroll = max(0, len(rows) * row_h + 8 - area.height)
+        lw = int(W * 0.42)
         s.set_clip(area)
         for i, (k, v, col) in enumerate(rows):
-            y = top + 4 + i * row_h - self.scroll
+            y = top + S(4) + i * row_h - self.scroll
             cy = y + row_h // 2
-            text(s, k, (14, cy), 14, MUTED, anchor="midleft", maxw=200)
-            text(s, v, (W - 14, cy), 14, col, True, "midright", maxw=250)
-            pygame.draw.line(s, CARD, (14, y + row_h - 1), (W - 14, y + row_h - 1))
+            text(s, k, (S(14), cy), 13, MUTED, anchor="midleft", maxw=lw - S(14))
+            text(s, v, (W - S(14), cy), 13, col, True, "midright", maxw=W - lw - S(20))
+            pygame.draw.line(s, CARD, (S(14), y + row_h - 1), (W - S(14), y + row_h - 1))
         s.set_clip(None)
         self._scrollbar(area, len(rows) * row_h + 8)
 
     def _scrollbar(self, area, content_h):
-        if content_h <= area.height:
+        if content_h <= area.height or self.max_scroll <= 0:
             return
-        frac = area.height / content_h
-        h = max(24, int(area.height * frac))
+        h = max(20, int(area.height * area.height / content_h))
         y = area.y + int((area.height - h) * (self.scroll / self.max_scroll))
         pygame.draw.rect(self.screen, TRACK, (W - 4, y, 3, h), border_radius=2)
 
 
+# ---------------------------------------------------------------- ΕΞΟΔΟΣ ΕΙΚΟΝΑΣ
+class FramebufferOutput:
+    """Γράφει απευθείας στο /dev/fbX (π.χ. οθόνες ILI9341 με fbtft). Χωρίς numpy:
+    το pygame μετατρέπει σε RGB565 μέσω μιας επιφάνειας 16-bit."""
+
+    def __init__(self, dev):
+        name = os.path.basename(dev)
+        base = f"/sys/class/graphics/{name}"
+        with open(f"{base}/virtual_size") as f:
+            self.fw, self.fh = (int(v) for v in f.read().strip().split(","))
+        with open(f"{base}/bits_per_pixel") as f:
+            self.bpp = int(f.read().strip())
+        if (self.fw, self.fh) != (W, H):
+            print(f"Προσοχή: το {dev} είναι {self.fw}x{self.fh}, η εφαρμογή {W}x{H}. "
+                  f"Βάλε PANEL_WIDTH/PANEL_HEIGHT ή άλλαξε το rotate στο config.txt.")
+        if self.bpp == 16:
+            self.conv = pygame.Surface((W, H), 0, 16, (0xF800, 0x07E0, 0x001F, 0))
+        else:
+            self.conv = pygame.Surface((W, H), 0, 32, (0xFF0000, 0x00FF00, 0x0000FF, 0))
+        self.fd = os.open(dev, os.O_RDWR)
+        self.surface = pygame.Surface((W, H))
+
+    def present(self):
+        self.conv.blit(self.surface, (0, 0))
+        data = self.conv.get_buffer().raw
+        os.pwrite(self.fd, data, 0)
+
+    def clear(self):
+        self.surface.fill((0, 0, 0))
+        self.present()
+
+
+class SDLOutput:
+    def __init__(self):
+        flags = pygame.FULLSCREEN if CONFIG["fullscreen"] else 0
+        self.surface = pygame.display.set_mode((W, H), flags)
+        pygame.display.set_caption("Zigbee Panel")
+        if CONFIG["fullscreen"]:
+            pygame.mouse.set_visible(False)
+
+    def present(self):
+        pygame.display.flip()
+
+    def clear(self):
+        pass
+
+
+# ---------------------------------------------------------------- ΑΦΗ (evdev)
+class EvdevTouch:
+    """Διαβάζει την οθόνη αφής (ADS7846/XPT2046) από το /dev/input και βγάζει
+    γεγονότα ("down"|"move"|"up", raw_x, raw_y) σε μια ουρά."""
+
+    def __init__(self):
+        import queue
+        from evdev import InputDevice, ecodes, list_devices
+        self.ec = ecodes
+        self.q = queue.Queue()
+        self.dev = None
+        for path in list_devices():
+            d = InputDevice(path)
+            caps = d.capabilities()
+            abs_codes = [c[0] if isinstance(c, tuple) else c for c in caps.get(ecodes.EV_ABS, [])]
+            if ecodes.ABS_X in abs_codes and ecodes.BTN_TOUCH in caps.get(ecodes.EV_KEY, []):
+                self.dev = d
+                break
+        if not self.dev:
+            raise RuntimeError("Δεν βρέθηκε οθόνη αφής στο /dev/input")
+        print(f"Αφή: {self.dev.name} ({self.dev.path})")
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        ec = self.ec
+        x = y = None
+        pressed = was = False
+        for ev in self.dev.read_loop():
+            if ev.type == ec.EV_ABS:
+                if ev.code == ec.ABS_X:
+                    x = ev.value
+                elif ev.code == ec.ABS_Y:
+                    y = ev.value
+            elif ev.type == ec.EV_KEY and ev.code == ec.BTN_TOUCH:
+                pressed = ev.value == 1
+            elif ev.type == ec.EV_SYN and ev.code == ec.SYN_REPORT and x is not None:
+                if pressed and not was:
+                    self.q.put(("down", x, y))
+                elif pressed:
+                    self.q.put(("move", x, y))
+                elif was:
+                    self.q.put(("up", x, y))
+                was = pressed
+
+    def events(self):
+        while not self.q.empty():
+            yield self.q.get_nowait()
+
+
+def raw_to_screen(rx, ry):
+    c = CONFIG
+    if c["touch_swap"]:
+        rx, ry = ry, rx
+    sx = (rx - c["touch_x_min"]) / ((c["touch_x_max"] - c["touch_x_min"]) or 1) * W
+    sy = (ry - c["touch_y_min"]) / ((c["touch_y_max"] - c["touch_y_min"]) or 1) * H
+    return int(max(0, min(W - 1, sx))), int(max(0, min(H - 1, sy)))
+
+
+# ---------------------------------------------------------------- ΒΑΘΜΟΝΟΜΗΣΗ
+def calibrate(out, touch, env_path):
+    """Πατάς τρεις στόχους. Από αυτούς βρίσκουμε προσανατολισμό, αναστροφή και εύρος."""
+    m = 20
+    targets = [(m, m), (W - m, m), (m, H - m)]
+    raw = []
+    s = out.surface
+    for tx, ty in targets:
+        s.fill(BG)
+        text(s, "Βαθμονόμηση αφής", (W // 2, H // 2 - 14), 16, TEXT, True, "center")
+        text(s, f"Πάτα τον σταυρό ({len(raw) + 1}/3)", (W // 2, H // 2 + 12), 13, MUTED, anchor="center")
+        pygame.draw.line(s, AMBER, (tx - 12, ty), (tx + 12, ty), 2)
+        pygame.draw.line(s, AMBER, (tx, ty - 12), (tx, ty + 12), 2)
+        pygame.draw.circle(s, AMBER, (tx, ty), 6, 1)
+        out.present()
+        samples = []
+        while True:
+            ev = touch.q.get()
+            if ev[0] in ("down", "move"):
+                samples.append(ev[1:])
+            elif ev[0] == "up" and samples:
+                break
+        samples = samples[len(samples) // 3:] or samples  # αγνοούμε τις πρώτες (θορυβώδεις) τιμές
+        raw.append((sum(p[0] for p in samples) / len(samples), sum(p[1] for p in samples) / len(samples)))
+        time.sleep(0.3)
+        while not touch.q.empty():
+            touch.q.get_nowait()
+
+    (ax, ay), (bx, by), (cx, cy) = raw
+    swap = abs(by - ay) > abs(bx - ax)  # από αριστερά προς δεξιά άλλαξε κυρίως ο raw Y;
+    if swap:
+        x0, x1, y0, y1 = ay, by, ax, cx
+    else:
+        x0, x1, y0, y1 = ax, bx, ay, cy
+    ppx = (x1 - x0) / (W - 2 * m)
+    ppy = (y1 - y0) / (H - 2 * m)
+    vals = {
+        "PANEL_TOUCH_SWAP": "1" if swap else "0",
+        "PANEL_TOUCH_X_MIN": f"{x0 - m * ppx:.0f}",
+        "PANEL_TOUCH_X_MAX": f"{x1 + m * ppx:.0f}",
+        "PANEL_TOUCH_Y_MIN": f"{y0 - m * ppy:.0f}",
+        "PANEL_TOUCH_Y_MAX": f"{y1 + m * ppy:.0f}",
+    }
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            lines = [ln for ln in f.read().splitlines() if ln.split("=")[0].strip() not in vals]
+    lines += [f"{k}={v}" for k, v in vals.items()]
+    with open(env_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    for k, v in vals.items():
+        print(f"{k}={v}")
+    s.fill(BG)
+    text(s, "Η βαθμονόμηση αποθηκεύτηκε", (W // 2, H // 2 - 10), 15, GREEN, True, "center")
+    text(s, os.path.basename(env_path), (W // 2, H // 2 + 14), 12, MUTED, anchor="center")
+    out.present()
+    time.sleep(2)
+
+
 # ---------------------------------------------------------------- ΚΥΡΙΟΣ ΒΡΟΧΟΣ
 def main():
+    import sys
+    use_fb = CONFIG["output"] == "fb"
+    if use_fb:
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     pygame.init()
-    flags = pygame.FULLSCREEN if CONFIG["fullscreen"] else 0
-    screen = pygame.display.set_mode((W, H), flags)
-    pygame.display.set_caption("Zigbee Panel")
-    if CONFIG["fullscreen"]:
-        pygame.mouse.set_visible(False)
-    app = App(screen)
+    out = FramebufferOutput(CONFIG["fbdev"]) if use_fb else SDLOutput()
+    touch = None
+    if use_fb:
+        try:
+            touch = EvdevTouch()
+        except Exception as e:  # noqa: BLE001
+            print(f"Αφή μη διαθέσιμη: {e}")
+
+    if "--calibrate" in sys.argv:
+        if not touch:
+            sys.exit("Η βαθμονόμηση χρειάζεται οθόνη αφής (PANEL_OUTPUT=fb).")
+        env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.env")
+        calibrate(out, touch, env)
+        return
+
+    app = App(out.surface)
     clock = pygame.time.Clock()
-    down_pos, last_y, dragging = None, None, False
+    st = {"down": None, "last_y": 0, "drag": False}
     dirty = True
-    running = True
-    while running:
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT:
-                running = False
-            elif e.type == pygame.KEYDOWN and e.key in (pygame.K_ESCAPE, pygame.K_q):
-                running = False
-            elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
-                down_pos, last_y, dragging = e.pos, e.pos[1], False
-            elif e.type == pygame.MOUSEMOTION and down_pos:
-                if abs(e.pos[1] - down_pos[1]) > 10:
-                    dragging = True
-                if dragging:
-                    app.drag(e.pos[1] - last_y)
-                    last_y = e.pos[1]
-                    dirty = True
-            elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
-                if down_pos and not dragging:
-                    app.tap(e.pos)
-                down_pos, dragging = None, False
-                dirty = True
-        if app.tick():
+
+    def on_down(pos):
+        st.update(down=pos, last_y=pos[1], drag=False)
+
+    def on_move(pos):
+        nonlocal dirty
+        if not st["down"]:
+            return
+        if abs(pos[1] - st["down"][1]) > 10:
+            st["drag"] = True
+        if st["drag"]:
+            app.drag(pos[1] - st["last_y"])
+            st["last_y"] = pos[1]
             dirty = True
-        if dirty:
-            app.draw()
-            dirty = False
-        clock.tick(20)  # χαμηλό FPS: η οθόνη ξανασχεδιάζεται μόνο όταν αλλάζει κάτι
-    pygame.quit()
+
+    def on_up(pos):
+        nonlocal dirty
+        if st["down"] and not st["drag"]:
+            app.tap(st["down"])
+        st.update(down=None, drag=False)
+        dirty = True
+
+    running = True
+    try:
+        while running:
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT:
+                    running = False
+                elif e.type == pygame.KEYDOWN and e.key in (pygame.K_ESCAPE, pygame.K_q):
+                    running = False
+                elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                    on_down(e.pos)
+                elif e.type == pygame.MOUSEMOTION:
+                    on_move(e.pos)
+                elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
+                    on_up(e.pos)
+            if touch:
+                for kind, rx, ry in touch.events():
+                    pos = raw_to_screen(rx, ry)
+                    {"down": on_down, "move": on_move, "up": on_up}[kind](pos)
+            if app.tick():
+                dirty = True
+            if dirty:
+                app.draw()
+                out.present()
+                dirty = False
+            clock.tick(20)  # η οθόνη ξανασχεδιάζεται μόνο όταν αλλάζει κάτι
+    except KeyboardInterrupt:
+        pass
+    finally:
+        out.clear()
+        pygame.quit()
 
 
 if __name__ == "__main__":
