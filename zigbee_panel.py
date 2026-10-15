@@ -735,23 +735,36 @@ class EvdevTouch:
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
-        """Οι resistive οθόνες στέλνουν θόρυβο στην αρχή κάθε πατήματος: αγνοούμε τα
-        πρώτα δείγματα και δίνουμε τη διάμεσο των τελευταίων, για σταθερή θέση."""
+        """Οι resistive οθόνες στέλνουν θόρυβο στην αρχή κάθε πατήματος, και ο driver
+        στέλνει το «πατήθηκε» πριν από τις νέες συντεταγμένες. Γι' αυτό σε κάθε νέο
+        πάτημα ξεχνάμε τις παλιές τιμές και περιμένουμε φρέσκες X και Y."""
         ec = self.ec
         x = y = None
+        fresh_x = fresh_y = False
         pressed = False
         samples = []
         started = False
+        stale_reports = 0
         for ev in self.dev.read_loop():
             if ev.type == ec.EV_ABS:
                 if ev.code == ec.ABS_X:
-                    x = ev.value
+                    x, fresh_x = ev.value, True
                 elif ev.code == ec.ABS_Y:
-                    y = ev.value
+                    y, fresh_y = ev.value, True
             elif ev.type == ec.EV_KEY and ev.code == ec.BTN_TOUCH:
+                if ev.value == 1 and not pressed:
+                    fresh_x = fresh_y = False   # νέο πάτημα: οι παλιές τιμές δεν ισχύουν
+                    stale_reports = 0
                 pressed = ev.value == 1
             elif ev.type == ec.EV_SYN and ev.code == ec.SYN_REPORT:
                 if pressed and x is not None and y is not None:
+                    if not (fresh_x and fresh_y):
+                        # ο kernel δεν στέλνει τιμή που δεν άλλαξε: μετά από λίγες
+                        # αναφορές δεχόμαστε τον άξονα που δεν «ήρθε»
+                        stale_reports += 1
+                        if stale_reports < 4 or not (fresh_x or fresh_y):
+                            continue
+                        fresh_x = fresh_y = True
                     samples.append((x, y))
                     if len(samples) <= self.SKIP:
                         continue
@@ -764,6 +777,8 @@ class EvdevTouch:
                         self.q.put(("down", *pos))
                     self.q.put(("up", *pos))
                     samples, started = [], False
+                elif not pressed:
+                    started = False
 
     SKIP = 2
 
@@ -822,18 +837,22 @@ def fit_affine(raw, scr):
     return _solve3(m, vx) + _solve3(m, vy)
 
 
-def _wait_press(touch):
-    """Περιμένει ένα πλήρες πάτημα και επιστρέφει τη διάμεσο των raw τιμών του."""
+def _wait_press(touch, min_samples=4):
+    """Περιμένει ένα πάτημα που κρατήθηκε αρκετά και επιστρέφει τη διάμεσο των raw
+    τιμών του. Τα πολύ σύντομα πατήματα αγνοούνται (δεν είναι αξιόπιστα)."""
     while not touch.q.empty():
         touch.q.get_nowait()
     samples = []
     while True:
         kind, rx, ry = touch.q.get()
-        if kind in ("down", "move"):
+        if kind == "down":
+            samples = [(rx, ry)]
+        elif kind == "move":
             samples.append((rx, ry))
         elif kind == "up":
-            samples.append((rx, ry))
-            return EvdevTouch._median(samples)
+            if len(samples) >= min_samples:
+                return EvdevTouch._median(samples[len(samples) // 4:])
+            samples = []
 
 
 def calibrate(out, touch, env_path):
