@@ -772,15 +772,42 @@ class EvdevTouch:
                     self.q.put(("move" if started else "down", *pos))
                     started = True
                 elif not pressed and samples:
-                    pos = self._median(samples[-5:]) if len(samples) > self.SKIP else self._median(samples)
+                    pos, n = self.stable(samples)
+                    if n < 2:
+                        pos = self._median(samples)
                     if not started:  # πολύ σύντομο πάτημα: στέλνουμε κι ένα down
                         self.q.put(("down", *pos))
+                    self.last_press = list(samples)
                     self.q.put(("up", *pos))
                     samples, started = [], False
                 elif not pressed:
                     started = False
 
     SKIP = 2
+    STABLE_TOL = 90   # raw μονάδες (~8 pixels): πόσο μπορεί να «τρέμει» ένα σταθερό πάτημα
+
+    @classmethod
+    def stable(cls, pts, tol=None):
+        """Βρίσκει το μεγαλύτερο συνεχόμενο κομμάτι δειγμάτων που μένει σταθερό
+        (μέσα σε tol). Τα ελαφριά/μισά αγγίγματα «γλιστράνε» και δεν περνάνε.
+        Επιστρέφει (διάμεσος, πλήθος δειγμάτων του κομματιού)."""
+        tol = tol or cls.STABLE_TOL
+        best = (0, 0)
+        for i in range(len(pts)):
+            xs, ys = [pts[i][0]] * 2, [pts[i][1]] * 2
+            j = i
+            while j + 1 < len(pts):
+                nx, ny = pts[j + 1]
+                lo_x, hi_x = min(xs[0], nx), max(xs[1], nx)
+                lo_y, hi_y = min(ys[0], ny), max(ys[1], ny)
+                if hi_x - lo_x > tol or hi_y - lo_y > tol:
+                    break
+                xs, ys = [lo_x, hi_x], [lo_y, hi_y]
+                j += 1
+            if j - i + 1 > best[1] - best[0]:
+                best = (i, j + 1)
+        run = pts[best[0]:best[1]]
+        return (cls._median(run) if run else None), len(run)
 
     @staticmethod
     def _median(pts):
@@ -837,71 +864,97 @@ def fit_affine(raw, scr):
     return _solve3(m, vx) + _solve3(m, vy)
 
 
-def _wait_press(touch, min_samples=4):
-    """Περιμένει ένα πάτημα που κρατήθηκε αρκετά και επιστρέφει τη διάμεσο των raw
-    τιμών του. Τα πολύ σύντομα πατήματα αγνοούνται (δεν είναι αξιόπιστα)."""
+def _wait_press(touch, min_points=4):
+    """Περιμένει ένα σταθερό πάτημα. Επιστρέφει τη διάμεσο του σταθερού του κομματιού,
+    ή None αν το πάτημα ήταν ασταθές (ελαφρύ / μισό άγγιγμα)."""
     while not touch.q.empty():
         touch.q.get_nowait()
-    samples = []
     while True:
         kind, rx, ry = touch.q.get()
-        if kind == "down":
-            samples = [(rx, ry)]
-        elif kind == "move":
-            samples.append((rx, ry))
-        elif kind == "up":
-            if len(samples) >= min_samples:
-                return EvdevTouch._median(samples[len(samples) // 4:])
-            samples = []
+        if kind != "up":
+            continue
+        pts = getattr(touch, "last_press", None) or [(rx, ry)]
+        pos, n = EvdevTouch.stable(pts)
+        return pos if n >= min_points else None
+
+
+def _residuals(coef, raw, scr):
+    a, b, c, d, e, f = coef
+    return [math.hypot(a * rx + b * ry + c - tx, d * rx + e * ry + f - ty)
+            for (rx, ry), (tx, ty) in zip(raw, scr)]
+
+
+def _outlier(raw, scr):
+    """Ποιο σημείο ταιριάζει λιγότερο: το προβλέπουμε από τα υπόλοιπα τέσσερα."""
+    worst, worst_err = 0, -1
+    for i in range(len(raw)):
+        others_r = raw[:i] + raw[i + 1:]
+        others_s = scr[:i] + scr[i + 1:]
+        try:
+            err = _residuals(fit_affine(others_r, others_s), [raw[i]], [scr[i]])[0]
+        except ValueError:
+            continue
+        if err > worst_err:
+            worst, worst_err = i, err
+    return worst
 
 
 def calibrate(out, touch, env_path):
-    """Πέντε στόχοι (4 γωνίες + κέντρο). Αν κάποιο πάτημα δεν ταιριάζει με τα άλλα,
-    η βαθμονόμηση ξαναρχίζει αντί να αποθηκευτεί λάθος."""
+    """Πέντε στόχοι (4 γωνίες + κέντρο). Κάθε πάτημα πρέπει να είναι σταθερό. Αν στο
+    τέλος κάποιο σημείο δεν ταιριάζει με τα άλλα, ξαναζητάμε μόνο αυτό."""
     m = max(20, S(30))
     targets = [(m, m), (W - m, m), (W - m, H - m), (m, H - m), (W // 2, H // 2)]
+    limit = max(15, S(22))
     s = out.surface
-    for attempt in range(1, 4):
-        raw = []
-        for n, (tx, ty) in enumerate(targets, 1):
+
+    def ask(n, title, hint):
+        tx, ty = targets[n]
+        while True:
             s.fill(BG)
-            msg = "Βαθμονόμηση αφής" + (f" (προσπάθεια {attempt})" if attempt > 1 else "")
-            cy = H // 2 + (30 if ty < H // 2 else -30) if (tx, ty) != (W // 2, H // 2) else H // 2 - 50
-            text(s, msg, (W // 2, cy - 12), 15, TEXT, True, "center")
-            text(s, f"Πάτα και κράτα τον σταυρό ({n}/5)", (W // 2, cy + 12), 12, MUTED, anchor="center")
+            cy = H // 2 - 50 if n == 4 else (H // 2 + 30 if ty < H // 2 else H // 2 - 30)
+            text(s, title, (W // 2, cy - 12), 15, TEXT, True, "center")
+            text(s, hint, (W // 2, cy + 12), 12, MUTED, anchor="center")
             pygame.draw.line(s, AMBER, (tx - 14, ty), (tx + 14, ty), 2)
             pygame.draw.line(s, AMBER, (tx, ty - 14), (tx, ty + 14), 2)
             pygame.draw.circle(s, AMBER, (tx, ty), 7, 1)
             out.present()
             r = _wait_press(touch)
-            raw.append(r)
-            print(f"στόχος {n} ({tx},{ty}) -> raw {r}")
+            if r is None:
+                print(f"στόχος {n + 1}: ασταθές πάτημα, ξανά")
+                pygame.draw.circle(s, RED, (tx, ty), 9)
+                hint = "Πάτα πιο σταθερά και κράτα"
+                out.present()
+                time.sleep(0.5)
+                continue
+            print(f"στόχος {n + 1} {targets[n]} -> raw {r}")
             pygame.draw.circle(s, GREEN, (tx, ty), 9)
             out.present()
             time.sleep(0.4)
+            return r
+
+    raw = [ask(i, "Βαθμονόμηση αφής", f"Πάτα και κράτα τον σταυρό ({i + 1}/5)") for i in range(5)]
+    coef, err = None, 999.0
+    for retry in range(7):
         try:
             coef = fit_affine(raw, targets)
+            err = max(_residuals(coef, raw, targets))
         except ValueError:
-            coef = None
-        err = 999
-        if coef:
-            a, b, c, d, e, f = coef
-            err = max(math.hypot(a * rx + b * ry + c - tx, d * rx + e * ry + f - ty)
-                      for (rx, ry), (tx, ty) in zip(raw, targets))
+            coef, err = None, 999.0
         print(f"μέγιστο σφάλμα: {err:.1f} px")
-        if err <= max(12, S(18)):
+        if coef and err <= limit:
             break
-        s.fill(BG)
-        text(s, "Κάποιο πάτημα δεν ήταν ακριβές", (W // 2, H // 2 - 12), 15, AMBER, True, "center")
-        text(s, "Ξεκινάμε ξανά…", (W // 2, H // 2 + 12), 12, MUTED, anchor="center")
-        out.present()
-        time.sleep(2)
-    else:
+        if retry == 6:
+            break
+        bad = _outlier(raw, targets)
+        print(f"ο στόχος {bad + 1} δεν ταιριάζει με τους άλλους: ξανά μόνο αυτός")
+        raw[bad] = ask(bad, "Ξανά αυτόν τον σταυρό", "Η προηγούμενη μέτρηση ήταν λάθος")
+
+    if not coef or err > limit:
         s.fill(BG)
         text(s, "Η βαθμονόμηση απέτυχε", (W // 2, H // 2 - 12), 15, RED, True, "center")
         text(s, "Δες το μήνυμα στο SSH", (W // 2, H // 2 + 12), 12, MUTED, anchor="center")
         out.present()
-        print("Η βαθμονόμηση απέτυχε 3 φορές. Στείλε τις γραμμές 'στόχος ...' παραπάνω.")
+        print("Η βαθμονόμηση απέτυχε. Στείλε τις γραμμές 'στόχος ...' παραπάνω.")
         time.sleep(3)
         return
 
