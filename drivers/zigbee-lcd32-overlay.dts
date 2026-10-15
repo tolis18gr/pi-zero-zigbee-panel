@@ -1,0 +1,90 @@
+/*
+ * Overlay για την LCDwiki 3.2" RPi Display (MPI3201): ILI9341 (fbtft) + XPT2046/ADS7846 αφή.
+ * Ίδια pins και ρυθμίσεις με το tft9341 της LCDwiki (DC=GPIO22, RESET=GPIO27, PENIRQ=GPIO17),
+ * με μεγαλύτερο ti,pressure-max: με το 255 του αρχικού, ο driver πετούσε τα πατήματα
+ * στη μία πλευρά της οθόνης.
+ *
+ * config.txt:  dtoverlay=zigbee-lcd32,rotate=270
+ * Παράμετροι:  rotate, speed, fps, pmax (όριο πίεσης), xohms, swapxy
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@2 {
+		target = <&spidev1>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@3 {
+		target = <&gpio>;
+		__overlay__ {
+			zp_lcd_pins: zp_lcd_pins {
+				brcm,pins = <17 27 22>;
+				brcm,function = <0 0 0>;
+			};
+		};
+	};
+
+	fragment@4 {
+		target = <&spi0>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			zp_lcd: tft9341@0 {
+				compatible = "ilitek,ili9340";
+				reg = <0>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&zp_lcd_pins>;
+				spi-max-frequency = <16000000>;
+				txbuflen = <32768>;
+				rotate = <270>;
+				fps = <25>;
+				bgr = <0>;
+				buswidth = <8>;
+				reset-gpios = <&gpio 27 1>;
+				dc-gpios = <&gpio 22 0>;
+				debug = <0>;
+			};
+
+			zp_ts: tft9341-ts@1 {
+				compatible = "ti,ads7846";
+				reg = <1>;
+				spi-max-frequency = <2000000>;
+				interrupts = <17 2>;
+				interrupt-parent = <&gpio>;
+				pendown-gpio = <&gpio 17 1>;
+				ti,x-plate-ohms = /bits/ 16 <60>;
+				ti,pressure-max = /bits/ 16 <4095>;
+			};
+		};
+	};
+
+	__overrides__ {
+		rotate = <&zp_lcd>, "rotate:0";
+		speed  = <&zp_lcd>, "spi-max-frequency:0";
+		fps    = <&zp_lcd>, "fps:0";
+		pmax   = <&zp_ts>, "ti,pressure-max;0";
+		xohms  = <&zp_ts>, "ti,x-plate-ohms;0";
+		swapxy = <&zp_ts>, "ti,swap-xy?";
+	};
+};

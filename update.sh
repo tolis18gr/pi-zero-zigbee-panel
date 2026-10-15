@@ -17,6 +17,11 @@ if git diff --name-only "$OLD" "$NEW" | grep -q '^systemd/'; then
     systemd/zigbee-panel.service.template | sudo tee /etc/systemd/system/zigbee-panel.service >/dev/null
   sudo systemctl daemon-reload
 fi
+REBOOT=0
+if git diff --name-only "$OLD" "$NEW" | grep -q '^drivers/'; then
+  "$DIR/display.sh" || { [ $? -eq 10 ] && REBOOT=1; }
+fi
 sudo systemctl restart zigbee-panel
 echo "✓ Ενημερώθηκε $OLD → $NEW"
+[ "$REBOOT" = 1 ] && echo "⚠ Άλλαξε ο driver της οθόνης: κάνε 'sudo reboot'"
 git log --oneline "$OLD..$NEW"
