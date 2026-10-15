@@ -51,6 +51,8 @@ CONFIG = {
     "touch_x_max": float(os.getenv("PANEL_TOUCH_X_MAX", "4095")),
     "touch_y_min": float(os.getenv("PANEL_TOUCH_Y_MIN", "0")),
     "touch_y_max": float(os.getenv("PANEL_TOUCH_Y_MAX", "4095")),
+    # 5σημειακή βαθμονόμηση: sx = a*rx + b*ry + c, sy = d*rx + e*ry + f (υπερισχύει των παραπάνω)
+    "touch_affine": [float(v) for v in os.getenv("PANEL_TOUCH_AFFINE", "").split(",") if v.strip()],
 }
 W, H = CONFIG["width"], CONFIG["height"]
 K = min(W / 480, H / 320)        # κλίμακα γεωμετρίας (σχεδιασμένο αρχικά για 480x320)
@@ -778,6 +780,10 @@ class EvdevTouch:
 
 def raw_to_screen(rx, ry):
     c = CONFIG
+    if len(c["touch_affine"]) == 6:
+        a, b, cc, d, e, f = c["touch_affine"]
+        sx, sy = a * rx + b * ry + cc, d * rx + e * ry + f
+        return int(max(0, min(W - 1, sx))), int(max(0, min(H - 1, sy)))
     if c["touch_swap"]:
         rx, ry = ry, rx
     sx = (rx - c["touch_x_min"]) / ((c["touch_x_max"] - c["touch_x_min"]) or 1) * W
@@ -786,60 +792,115 @@ def raw_to_screen(rx, ry):
 
 
 # ---------------------------------------------------------------- ΒΑΘΜΟΝΟΜΗΣΗ
-def calibrate(out, touch, env_path):
-    """Πατάς τρεις στόχους. Από αυτούς βρίσκουμε προσανατολισμό, αναστροφή και εύρος."""
-    m = 20
-    targets = [(m, m), (W - m, m), (m, H - m)]
-    raw = []
-    s = out.surface
-    for tx, ty in targets:
-        s.fill(BG)
-        text(s, "Βαθμονόμηση αφής", (W // 2, H // 2 - 14), 16, TEXT, True, "center")
-        text(s, f"Πάτα τον σταυρό ({len(raw) + 1}/3)", (W // 2, H // 2 + 12), 13, MUTED, anchor="center")
-        pygame.draw.line(s, AMBER, (tx - 12, ty), (tx + 12, ty), 2)
-        pygame.draw.line(s, AMBER, (tx, ty - 12), (tx, ty + 12), 2)
-        pygame.draw.circle(s, AMBER, (tx, ty), 6, 1)
-        out.present()
-        samples = []
-        while True:
-            ev = touch.q.get()
-            if ev[0] in ("down", "move"):
-                samples.append(ev[1:])
-            elif ev[0] == "up" and samples:
-                break
-        samples = samples[len(samples) // 3:] or samples  # αγνοούμε τις πρώτες (θορυβώδεις) τιμές
-        raw.append((sum(p[0] for p in samples) / len(samples), sum(p[1] for p in samples) / len(samples)))
-        time.sleep(0.3)
-        while not touch.q.empty():
-            touch.q.get_nowait()
+def _solve3(m, v):
+    """Λύνει σύστημα 3x3 (Gauss με οδήγηση)."""
+    a = [row[:] + [v[i]] for i, row in enumerate(m)]
+    for col in range(3):
+        piv = max(range(col, 3), key=lambda r: abs(a[r][col]))
+        a[col], a[piv] = a[piv], a[col]
+        if abs(a[col][col]) < 1e-9:
+            raise ValueError("τα σημεία δεν αρκούν")
+        for r in range(3):
+            if r != col:
+                k = a[r][col] / a[col][col]
+                a[r] = [x - k * y for x, y in zip(a[r], a[col])]
+    return [a[i][3] / a[i][i] for i in range(3)]
 
-    (ax, ay), (bx, by), (cx, cy) = raw
-    swap = abs(by - ay) > abs(bx - ax)  # από αριστερά προς δεξιά άλλαξε κυρίως ο raw Y;
-    if swap:
-        x0, x1, y0, y1 = ay, by, ax, cx
+
+def fit_affine(raw, scr):
+    """Ελάχιστα τετράγωνα: βρίσκει a..f ώστε raw -> οθόνη. Χειρίζεται μόνο του
+    αναστροφές, εναλλαγή αξόνων και μικρή κλίση της επιφάνειας αφής."""
+    m = [[0.0] * 3 for _ in range(3)]
+    vx, vy = [0.0] * 3, [0.0] * 3
+    for (rx, ry), (sx, sy) in zip(raw, scr):
+        row = (rx, ry, 1.0)
+        for i in range(3):
+            for j in range(3):
+                m[i][j] += row[i] * row[j]
+            vx[i] += row[i] * sx
+            vy[i] += row[i] * sy
+    return _solve3(m, vx) + _solve3(m, vy)
+
+
+def _wait_press(touch):
+    """Περιμένει ένα πλήρες πάτημα και επιστρέφει τη διάμεσο των raw τιμών του."""
+    while not touch.q.empty():
+        touch.q.get_nowait()
+    samples = []
+    while True:
+        kind, rx, ry = touch.q.get()
+        if kind in ("down", "move"):
+            samples.append((rx, ry))
+        elif kind == "up":
+            samples.append((rx, ry))
+            return EvdevTouch._median(samples)
+
+
+def calibrate(out, touch, env_path):
+    """Πέντε στόχοι (4 γωνίες + κέντρο). Αν κάποιο πάτημα δεν ταιριάζει με τα άλλα,
+    η βαθμονόμηση ξαναρχίζει αντί να αποθηκευτεί λάθος."""
+    m = max(20, S(30))
+    targets = [(m, m), (W - m, m), (W - m, H - m), (m, H - m), (W // 2, H // 2)]
+    s = out.surface
+    for attempt in range(1, 4):
+        raw = []
+        for n, (tx, ty) in enumerate(targets, 1):
+            s.fill(BG)
+            msg = "Βαθμονόμηση αφής" + (f" (προσπάθεια {attempt})" if attempt > 1 else "")
+            cy = H // 2 + (30 if ty < H // 2 else -30) if (tx, ty) != (W // 2, H // 2) else H // 2 - 50
+            text(s, msg, (W // 2, cy - 12), 15, TEXT, True, "center")
+            text(s, f"Πάτα και κράτα τον σταυρό ({n}/5)", (W // 2, cy + 12), 12, MUTED, anchor="center")
+            pygame.draw.line(s, AMBER, (tx - 14, ty), (tx + 14, ty), 2)
+            pygame.draw.line(s, AMBER, (tx, ty - 14), (tx, ty + 14), 2)
+            pygame.draw.circle(s, AMBER, (tx, ty), 7, 1)
+            out.present()
+            r = _wait_press(touch)
+            raw.append(r)
+            print(f"στόχος {n} ({tx},{ty}) -> raw {r}")
+            pygame.draw.circle(s, GREEN, (tx, ty), 9)
+            out.present()
+            time.sleep(0.4)
+        try:
+            coef = fit_affine(raw, targets)
+        except ValueError:
+            coef = None
+        err = 999
+        if coef:
+            a, b, c, d, e, f = coef
+            err = max(math.hypot(a * rx + b * ry + c - tx, d * rx + e * ry + f - ty)
+                      for (rx, ry), (tx, ty) in zip(raw, targets))
+        print(f"μέγιστο σφάλμα: {err:.1f} px")
+        if err <= max(12, S(18)):
+            break
+        s.fill(BG)
+        text(s, "Κάποιο πάτημα δεν ήταν ακριβές", (W // 2, H // 2 - 12), 15, AMBER, True, "center")
+        text(s, "Ξεκινάμε ξανά…", (W // 2, H // 2 + 12), 12, MUTED, anchor="center")
+        out.present()
+        time.sleep(2)
     else:
-        x0, x1, y0, y1 = ax, bx, ay, cy
-    ppx = (x1 - x0) / (W - 2 * m)
-    ppy = (y1 - y0) / (H - 2 * m)
-    vals = {
-        "PANEL_TOUCH_SWAP": "1" if swap else "0",
-        "PANEL_TOUCH_X_MIN": f"{x0 - m * ppx:.0f}",
-        "PANEL_TOUCH_X_MAX": f"{x1 + m * ppx:.0f}",
-        "PANEL_TOUCH_Y_MIN": f"{y0 - m * ppy:.0f}",
-        "PANEL_TOUCH_Y_MAX": f"{y1 + m * ppy:.0f}",
-    }
+        s.fill(BG)
+        text(s, "Η βαθμονόμηση απέτυχε", (W // 2, H // 2 - 12), 15, RED, True, "center")
+        text(s, "Δες το μήνυμα στο SSH", (W // 2, H // 2 + 12), 12, MUTED, anchor="center")
+        out.present()
+        print("Η βαθμονόμηση απέτυχε 3 φορές. Στείλε τις γραμμές 'στόχος ...' παραπάνω.")
+        time.sleep(3)
+        return
+
+    vals = {"PANEL_TOUCH_AFFINE": ",".join(f"{v:.6g}" for v in coef)}
+    old = {"PANEL_TOUCH_SWAP", "PANEL_TOUCH_X_MIN", "PANEL_TOUCH_X_MAX",
+           "PANEL_TOUCH_Y_MIN", "PANEL_TOUCH_Y_MAX", *vals}
     lines = []
     if os.path.exists(env_path):
-        with open(env_path) as f:
-            lines = [ln for ln in f.read().splitlines() if ln.split("=")[0].strip() not in vals]
+        with open(env_path) as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.split("=")[0].strip() not in old]
     lines += [f"{k}={v}" for k, v in vals.items()]
-    with open(env_path, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    for k, v in vals.items():
-        print(f"{k}={v}")
+    with open(env_path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    CONFIG["touch_affine"] = coef
+    print(f"PANEL_TOUCH_AFFINE={vals['PANEL_TOUCH_AFFINE']}")
     s.fill(BG)
-    text(s, "Η βαθμονόμηση αποθηκεύτηκε", (W // 2, H // 2 - 10), 15, GREEN, True, "center")
-    text(s, os.path.basename(env_path), (W // 2, H // 2 + 14), 12, MUTED, anchor="center")
+    text(s, "Η βαθμονόμηση αποθηκεύτηκε", (W // 2, H // 2 - 12), 15, GREEN, True, "center")
+    text(s, f"ακρίβεια ±{err:.0f} pixels", (W // 2, H // 2 + 12), 12, MUTED, anchor="center")
     out.present()
     time.sleep(2)
 
