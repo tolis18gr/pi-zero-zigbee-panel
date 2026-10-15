@@ -732,9 +732,13 @@ class EvdevTouch:
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
+        """Οι resistive οθόνες στέλνουν θόρυβο στην αρχή κάθε πατήματος: αγνοούμε τα
+        πρώτα δείγματα και δίνουμε τη διάμεσο των τελευταίων, για σταθερή θέση."""
         ec = self.ec
         x = y = None
-        pressed = was = False
+        pressed = False
+        samples = []
+        started = False
         for ev in self.dev.read_loop():
             if ev.type == ec.EV_ABS:
                 if ev.code == ec.ABS_X:
@@ -743,14 +747,28 @@ class EvdevTouch:
                     y = ev.value
             elif ev.type == ec.EV_KEY and ev.code == ec.BTN_TOUCH:
                 pressed = ev.value == 1
-            elif ev.type == ec.EV_SYN and ev.code == ec.SYN_REPORT and x is not None:
-                if pressed and not was:
-                    self.q.put(("down", x, y))
-                elif pressed:
-                    self.q.put(("move", x, y))
-                elif was:
-                    self.q.put(("up", x, y))
-                was = pressed
+            elif ev.type == ec.EV_SYN and ev.code == ec.SYN_REPORT:
+                if pressed and x is not None and y is not None:
+                    samples.append((x, y))
+                    if len(samples) <= self.SKIP:
+                        continue
+                    pos = self._median(samples[-5:])
+                    self.q.put(("move" if started else "down", *pos))
+                    started = True
+                elif not pressed and samples:
+                    pos = self._median(samples[-5:]) if len(samples) > self.SKIP else self._median(samples)
+                    if not started:  # πολύ σύντομο πάτημα: στέλνουμε κι ένα down
+                        self.q.put(("down", *pos))
+                    self.q.put(("up", *pos))
+                    samples, started = [], False
+
+    SKIP = 2
+
+    @staticmethod
+    def _median(pts):
+        xs = sorted(p[0] for p in pts)
+        ys = sorted(p[1] for p in pts)
+        return xs[len(xs) // 2], ys[len(ys) // 2]
 
     def events(self):
         while not self.q.empty():
@@ -825,6 +843,42 @@ def calibrate(out, touch, env_path):
     time.sleep(2)
 
 
+def touch_test(out, touch):
+    """Δείχνει πού «βλέπει» το πάτημα η εφαρμογή. Τέλος με Ctrl+C ή 30″ χωρίς άγγιγμα."""
+    s = out.surface
+    pos = raw = None
+    trail = []
+    last = time.time()
+
+    def redraw():
+        s.fill(BG)
+        text(s, "Δοκιμή αφής", (W // 2, 14), 15, TEXT, True, "midtop")
+        text(s, "Ζωγράφισε με το δάχτυλο", (W // 2, 36), 12, MUTED, anchor="midtop")
+        for p in trail:
+            pygame.draw.circle(s, AMBER, p, 2)
+        if pos:
+            pygame.draw.line(s, GREEN, (pos[0], 0), (pos[0], H), 1)
+            pygame.draw.line(s, GREEN, (0, pos[1]), (W, pos[1]), 1)
+            pygame.draw.circle(s, GREEN, pos, 8, 2)
+            text(s, f"οθόνη {pos[0]},{pos[1]}   raw {raw[0]},{raw[1]}", (W // 2, H - 10), 12, TEXT,
+                 anchor="midbottom")
+        out.present()
+
+    redraw()
+    print("Δοκιμή αφής: άγγιξε την οθόνη (Ctrl+C για έξοδο)")
+    while time.time() - last < 30:
+        changed = False
+        for kind, rx, ry in touch.events():
+            raw, pos = (rx, ry), raw_to_screen(rx, ry)
+            trail.append(pos)
+            trail[:] = trail[-300:]
+            print(f"{kind:4s} raw=({rx},{ry}) -> οθόνη={pos}")
+            last, changed = time.time(), True
+        if changed:
+            redraw()
+        time.sleep(0.03)
+
+
 # ---------------------------------------------------------------- ΚΥΡΙΟΣ ΒΡΟΧΟΣ
 def main():
     import sys
@@ -840,6 +894,16 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"Αφή μη διαθέσιμη: {e}")
 
+    if "--touch-test" in sys.argv:
+        if not touch:
+            sys.exit("Δεν βρέθηκε οθόνη αφής. Δες: ls /dev/input/  και  dmesg | grep -i ads7846")
+        try:
+            touch_test(out, touch)
+        except KeyboardInterrupt:
+            pass
+        out.clear()
+        return
+
     if "--calibrate" in sys.argv:
         if not touch:
             sys.exit("Η βαθμονόμηση χρειάζεται οθόνη αφής (PANEL_OUTPUT=fb).")
@@ -852,6 +916,8 @@ def main():
     st = {"down": None, "last_y": 0, "drag": False}
     dirty = True
 
+    drag_px = max(16, H // 12)  # πόση κίνηση μετράει ως σύρσιμο και όχι πάτημα
+
     def on_down(pos):
         st.update(down=pos, last_y=pos[1], drag=False)
 
@@ -859,8 +925,9 @@ def main():
         nonlocal dirty
         if not st["down"]:
             return
-        if abs(pos[1] - st["down"][1]) > 10:
+        if not st["drag"] and abs(pos[1] - st["down"][1]) > drag_px:
             st["drag"] = True
+            st["last_y"] = pos[1]
         if st["drag"]:
             app.drag(pos[1] - st["last_y"])
             st["last_y"] = pos[1]
@@ -869,7 +936,7 @@ def main():
     def on_up(pos):
         nonlocal dirty
         if st["down"] and not st["drag"]:
-            app.tap(st["down"])
+            app.tap(pos)
         st.update(down=None, drag=False)
         dirty = True
 

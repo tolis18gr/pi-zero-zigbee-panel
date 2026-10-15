@@ -73,6 +73,7 @@ dmesg | grep -iE "fbtft|ili|ads7846"
 | Δοκιμή χωρίς Zigbee | `PANEL_DEMO=1 python3 zigbee_panel.py` |
 | Δοκιμή στον υπολογιστή (παράθυρο) | `PANEL_DEMO=1 PANEL_OUTPUT=sdl PANEL_FULLSCREEN=0 python3 zigbee_panel.py` |
 | Βαθμονόμηση αφής | `./calibrate.sh` |
+| Δοκιμή αφής (δείχνει πού πέφτει το πάτημα) | `./touchtest.sh` |
 | Logs | `journalctl -u zigbee-panel -f` |
 | Επανεκκίνηση | `sudo systemctl restart zigbee-panel` |
 
