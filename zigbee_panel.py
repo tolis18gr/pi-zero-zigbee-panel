@@ -42,6 +42,9 @@ CONFIG = {
     # "fb": γράφει απευθείας στο framebuffer (οθόνες SPI στις GPIO), "sdl": παράθυρο / HDMI
     "output": os.getenv("PANEL_OUTPUT", "fb"),
     "fbdev": os.getenv("PANEL_FB", "/dev/fb1"),
+    # Coordinator μέσω ser2net (το Pi κάνει γέφυρα USB -> δίκτυο για το Home Assistant)
+    "ser2net_port": int(os.getenv("PANEL_SER2NET_PORT", "6638")),
+    "coordinator_dev": os.getenv("PANEL_COORDINATOR_DEV", ""),
     # Βαθμονόμηση αφής (γράφεται αυτόματα από: python3 zigbee_panel.py --calibrate)
     "touch_swap": os.getenv("PANEL_TOUCH_SWAP", "0") == "1",
     "touch_x_min": float(os.getenv("PANEL_TOUCH_X_MIN", "0")),
@@ -158,6 +161,8 @@ class SysStats:
         self.ip = "—"
         self.procs = []
         self._ip_at = 0
+        self.coord = ("—", MUTED)
+        self._coord_at = 0
         psutil.cpu_percent(None)
         self.update_procs()  # αρχικοποίηση μετρητών CPU ανά διεργασία
 
@@ -170,6 +175,38 @@ class SysStats:
         if time.time() - self._ip_at > 30:
             self.ip = self._read_ip()
             self._ip_at = time.time()
+        if time.time() - self._coord_at > 5:
+            self.coord = self._read_coord()
+            self._coord_at = time.time()
+
+    @staticmethod
+    def _read_coord():
+        """Κατάσταση γέφυρας: υπάρχει το USB stick; τρέχει το ser2net; έχει συνδεθεί το HA;"""
+        if CONFIG["demo"]:
+            return "Σε HA", GREEN
+        dev = CONFIG["coordinator_dev"]
+        if dev:
+            present = os.path.exists(dev)
+        else:
+            present = os.path.isdir("/dev/serial/by-id") and bool(os.listdir("/dev/serial/by-id"))
+        if not present:
+            return "Χωρίς stick", RED
+        port = CONFIG["ser2net_port"]
+        listening = connected = False
+        try:
+            for c in psutil.net_connections("tcp"):
+                if c.laddr and c.laddr.port == port:
+                    if c.status == psutil.CONN_LISTEN:
+                        listening = True
+                    elif c.status == psutil.CONN_ESTABLISHED:
+                        connected = True
+        except (psutil.AccessDenied, OSError):
+            return "Άγνωστο", MUTED
+        if connected:
+            return "Σε HA", GREEN
+        if listening:
+            return "Αναμονή HA", AMBER
+        return "ser2net off", RED
 
     def update_procs(self):
         ncpu = psutil.cpu_count() or 1
@@ -480,7 +517,7 @@ class App:
         t = self.sys.temp
         items = [
             ("Θερμοκρασία", f"{t:.0f}°C" if t is not None else "—", level_color((t or 0) * 1.25)),
-            ("Σε λειτουργία", fmt_uptime(self.sys.uptime), TEXT),
+            ("Coordinator", self.sys.coord[0], self.sys.coord[1]),
             ("IP", self.sys.ip, TEXT),
         ]
         colw = [0.28, 0.32, 0.40]
@@ -494,7 +531,7 @@ class App:
     def draw_procs(self):
         s = self.screen
         procs = self.sys.procs
-        self.header("Διεργασίες", right=f"{len(procs)}")
+        self.header("Διεργασίες", right=f"ενεργό {fmt_uptime(self.sys.uptime)}")
         show_pid = W >= 400
         x_cpu, x_ram = W - S(90), W - S(16)
         cols = [(S(14), "Όνομα", "topleft")]

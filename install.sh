@@ -21,7 +21,16 @@ fi
 
 if [ ! -f "$DIR/panel.env" ]; then
   cp "$DIR/config.example.env" "$DIR/panel.env"
-  echo "→ Δημιουργήθηκε το panel.env (nano $DIR/panel.env για αλλαγές)"
+  echo "→ Στοιχεία MQTT του Home Assistant (Mosquitto add-on). Enter = προεπιλογή."
+  read -r -p "  IP του Home Assistant: " HA_IP
+  read -r -p "  Χρήστης MQTT: " MQ_USER
+  read -r -s -p "  Κωδικός MQTT: " MQ_PASS; echo
+  esc() { printf '%s' "$1" | sed -e 's/[\\/&|]/\\&/g'; }
+  sed -i -e "s|^PANEL_MQTT_HOST=.*|PANEL_MQTT_HOST=$(esc "${HA_IP:-localhost}")|" \
+         -e "s|^PANEL_MQTT_USER=.*|PANEL_MQTT_USER=$(esc "$MQ_USER")|" \
+         -e "s|^PANEL_MQTT_PASS=.*|PANEL_MQTT_PASS=$(esc "$MQ_PASS")|" "$DIR/panel.env"
+  chmod 600 "$DIR/panel.env"
+  echo "→ Αποθηκεύτηκε στο panel.env (nano $DIR/panel.env για αλλαγές)"
 fi
 
 echo "→ Ρύθμιση υπηρεσίας systemd…"
@@ -30,6 +39,15 @@ sed -e "s|__DIR__|$DIR|g" -e "s|__USER__|$USER_NAME|g" \
 sudo usermod -aG video,input "$USER_NAME" || true
 sudo systemctl daemon-reload
 sudo systemctl enable zigbee-panel
+
+echo "→ Εγκατάσταση ser2net (γέφυρα για τον coordinator)…"
+sudo apt-get install -y ser2net >/dev/null
+if ls /dev/serial/by-id/* >/dev/null 2>&1; then
+  read -r -p "→ Βρέθηκε USB stick. Ρύθμιση coordinator τώρα; [Y/n] " ans
+  [ "${ans:-Y}" != "n" ] && "$DIR/coordinator.sh"
+else
+  echo "→ Δεν υπάρχει ακόμα USB stick. Όταν το συνδέσεις, τρέξε: ./coordinator.sh"
+fi
 
 if [ "$NEED_REBOOT" = 1 ]; then
   echo "✓ Έτοιμο. Κάνε 'sudo reboot' και μετά τρέξε ./calibrate.sh για την αφή."
