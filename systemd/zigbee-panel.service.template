@@ -1,5 +1,5 @@
 [Unit]
-Description=Zigbee Panel (οθόνη 3.5")
+Description=Zigbee Panel (οθόνη 3.2")
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,10 @@ Wants=network-online.target
 User=__USER__
 WorkingDirectory=__DIR__
 EnvironmentFile=__DIR__/panel.env
+# Το "+" τρέχει αυτά τα βήματα ως root (χρειάζεται για την κονσόλα).
+ExecStartPre=+/bin/sh __DIR__/console.sh off
 ExecStart=/usr/bin/python3 __DIR__/zigbee_panel.py
+ExecStopPost=+/bin/sh __DIR__/console.sh on
 Restart=on-failure
 RestartSec=5
 

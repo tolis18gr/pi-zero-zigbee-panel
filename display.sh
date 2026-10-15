@@ -31,6 +31,16 @@ else
   CHANGED=1
 fi
 
+# Κονσόλα στην οθόνη αφής (fb1) αντί για το HDMI, για τα μηνύματα εκκίνησης/τερματισμού.
+CMDLINE="$(dirname "$CFG")/cmdline.txt"
+if [ -f "$CMDLINE" ] && ! grep -q "fbcon=map:" "$CMDLINE"; then
+  sudo cp "$CMDLINE" "$CMDLINE.bak-zigbee-panel"
+  # το cmdline.txt είναι ΜΙΑ γραμμή: προσθέτουμε στο τέλος της
+  sudo sed -i '1 s/[[:space:]]*$/ fbcon=map:10/' "$CMDLINE"
+  echo "→ Κονσόλα εκκίνησης: στην οθόνη αφής (fbcon=map:10)"
+  CHANGED=1
+fi
+
 if [ "$CHANGED" = 1 ]; then
   echo "✓ Driver οθόνης: $LINE  →  χρειάζεται 'sudo reboot'"
   exit 10   # σήμα για τα άλλα scripts ότι χρειάζεται επανεκκίνηση
