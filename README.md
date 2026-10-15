@@ -1,6 +1,6 @@
 # Zigbee Panel
 
-Οθόνη πληροφοριών για Raspberry Pi Zero W με οθόνη αφής 3.2" SPI (320×240, Waveshare ILI9341 / XPT2046).
+Οθόνη πληροφοριών για Raspberry Pi Zero W με οθόνη αφής 3.2" SPI (320×240, [LCDwiki 3.2inch RPi Display](https://lcdwiki.com/3.2inch_RPi_Display) MPI3201, ILI9341 / XPT2046).
 Δείχνει CPU, RAM, θερμοκρασία, διεργασίες και τις συσκευές Zigbee.
 Το Pi κάνει γέφυρα για τον USB Zigbee coordinator (ser2net) προς το Home Assistant.
 
@@ -11,6 +11,15 @@
 ```
 
 ![Οθόνες](docs/preview.png)
+
+## Προετοιμασία κάρτας SD
+
+Με το [Raspberry Pi Imager](https://www.raspberrypi.com/software/) γράψε **Raspberry Pi OS Lite (32-bit)**
+(χωρίς desktop: ο Zero W δεν το σηκώνει). Στις ρυθμίσεις του Imager (OS customisation) βάλε
+hostname, χρήστη/κωδικό, WiFi και ενεργοποίησε το **SSH**.
+
+**Μην τρέξεις το `LCD32-show` της LCDwiki.** Ο driver της οθόνης μπαίνει από το `install.sh`
+(μόνο το overlay, χωρίς αλλαγές σε άλλα αρχεία του συστήματος).
 
 ## Εγκατάσταση (μία φορά)
 
@@ -46,6 +55,16 @@ cd zigbee-panel
 ```bash
 ~/zigbee-panel/update.sh
 ```
+
+## Αν δεν ανάβει η οθόνη
+
+```bash
+ls /dev/fb*                 # πρέπει να υπάρχει /dev/fb1 (ή fb0 χωρίς HDMI)
+dmesg | grep -iE "fbtft|ili|ads7846"
+```
+
+Αν η οθόνη είναι fb0, βάλε `PANEL_FB=/dev/fb0` στο `panel.env`. Αν η εικόνα είναι
+ανάποδα, άλλαξε το `rotate=270` σε `rotate=90` στο config.txt και ξανατρέξε `./calibrate.sh`.
 
 ## Χρήσιμες εντολές
 
