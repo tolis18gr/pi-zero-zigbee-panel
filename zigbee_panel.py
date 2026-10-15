@@ -469,12 +469,14 @@ class App:
             elif action == "select":
                 self._open(devs[i]["name"])
             self.focus["devices"] = i
-        else:  # διεργασίες / λεπτομέρειες: κύλιση
+        else:  # διεργασίες / λεπτομέρειες: κύλιση, και το K2 κάνει πίσω (δεν υπάρχει κάτι να επιλέξεις)
             step = self.row_step * 2
             if action == "up":
                 self.drag(step)
             elif action == "down":
                 self.drag(-step)
+            elif action == "select":
+                self.back()
 
     def _coord_status(self):
         if self.sys.coord is not None:
@@ -518,7 +520,11 @@ class App:
             # όλο το αριστερό μέρος της κεφαλίδας είναι «πίσω» (η γωνία πιάνει δύσκολα)
             self.hits.append((pygame.Rect(0, 0, int(W * 0.6), hh + S(6)), self.back))
             x0 += 2 * a + S(14)
-        rr = text(s, right or time.strftime("%H:%M"), (W - S(12), cy), 15, MUTED, anchor="midright")
+        if back and self.key_mode:
+            hint = "K2: πίσω" if self.view in ("procs", "detail") else "κράτα K2: πίσω"
+            rr = text(s, hint, (W - S(12), cy), 13, AMBER, anchor="midright")
+        else:
+            rr = text(s, right or time.strftime("%H:%M"), (W - S(12), cy), 15, MUTED, anchor="midright")
         if dot is not None:
             pygame.draw.circle(s, dot, (rr.left - S(12), cy), max(3, S(5)))
             rr.left -= S(20)
