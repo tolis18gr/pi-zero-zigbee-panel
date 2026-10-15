@@ -45,6 +45,9 @@ CONFIG = {
     # Coordinator μέσω ser2net (το Pi κάνει γέφυρα USB -> δίκτυο για το Home Assistant)
     "ser2net_port": int(os.getenv("PANEL_SER2NET_PORT", "6638")),
     "coordinator_dev": os.getenv("PANEL_COORDINATOR_DEV", ""),
+    # Κουμπιά K1/K2/K3 στο πλάι της οθόνης (gpio-key, βλ. buttons.sh)
+    "keys_reversed": os.getenv("PANEL_KEYS_REVERSED", "0") == "1",
+    "long_press": float(os.getenv("PANEL_LONG_PRESS", "0.7")),
     # Βαθμονόμηση αφής (γράφεται αυτόματα από: python3 zigbee_panel.py --calibrate)
     "touch_swap": os.getenv("PANEL_TOUCH_SWAP", "0") == "1",
     "touch_x_min": float(os.getenv("PANEL_TOUCH_X_MIN", "0")),
@@ -407,6 +410,9 @@ class App:
         self.hits = []
         self.last_sys = 0
         self.last_procs = 0
+        self.focus = {"home": 0, "devices": 0}
+        self.key_mode = False      # True όταν η τελευταία ενέργεια ήταν κουμπί (δείχνει επιλογή)
+        self.row_step = S(30)
 
     # ---- πλοήγηση
     @property
@@ -433,6 +439,39 @@ class App:
 
     def drag(self, dy):
         self.scroll = max(0, min(self.max_scroll, self.scroll - dy))
+
+    def key(self, action):
+        """Πλοήγηση με τα κουμπιά: "up", "down", "select", "back"."""
+        self.key_mode = True
+        v = self.view
+        if action == "back":
+            self.back()
+        elif v == "home":
+            if action in ("up", "down"):
+                self.focus["home"] = 1 - self.focus["home"]
+            elif action == "select":
+                self.go("procs" if self.focus["home"] == 0 else "devices")
+        elif v == "devices":
+            devs = self.zb.snapshot()
+            if not devs:
+                return
+            i = max(0, min(len(devs) - 1, self.focus["devices"]))
+            if action == "up":
+                i = max(0, i - 1)
+            elif action == "down":
+                i = min(len(devs) - 1, i + 1)
+            elif action == "select":
+                self._open(devs[i]["name"])
+            self.focus["devices"] = i
+        else:  # διεργασίες / λεπτομέρειες: κύλιση
+            step = self.row_step * 2
+            if action == "up":
+                self.drag(step)
+            elif action == "down":
+                self.drag(-step)
+
+    def _focus_ring(self, r):
+        pygame.draw.rect(self.screen, AMBER, r.inflate(4, 4), width=2, border_radius=S(12))
 
     # ---- ενημέρωση δεδομένων
     def tick(self):
@@ -503,6 +542,8 @@ class App:
             text(s, foot, (r.centerx, r.bottom - S(14)), 13, fcol, anchor="center", maxw=cw - 6)
             if target:
                 self.hits.append((r, lambda t=target: self.go(t)))
+                if self.key_mode and self.focus["home"] == 0:
+                    self._focus_ring(r)
 
         r = pygame.Rect(gap * 3 + cw * 2, top, cw, ch)
         self._card(r, "Zigbee")
@@ -513,6 +554,8 @@ class App:
         text(s, sub, (r.centerx, nr.bottom + S(6)), 13, col, anchor="midtop")
         text(s, "λίστα", (r.centerx, r.bottom - S(14)), 13, AMBER, anchor="center")
         self.hits.append((r, lambda: self.go("devices")))
+        if self.key_mode and self.focus["home"] == 1:
+            self._focus_ring(r)
 
         # γραμμή κατάστασης: τρεις στήλες, ετικέτα πάνω και τιμή κάτω
         br = pygame.Rect(gap, H - gap - stat_h, W - 2 * gap, stat_h)
@@ -546,6 +589,7 @@ class App:
             text(s, label, (x, y0), 12, MUTED, anchor=anc)
         list_top = y0 + F(12) + S(10)
         row_h = max(22, S(30))
+        self.row_step = row_h
         area = pygame.Rect(0, list_top, W, H - list_top)
         self.max_scroll = max(0, len(procs) * row_h - area.height)
         name_w = (W - S(220) if show_pid else x_cpu - F(14) * 4) - S(20)
@@ -579,6 +623,13 @@ class App:
                  MUTED, anchor="center", maxw=W - 20)
             return
         self.max_scroll = max(0, len(devs) * row_h - area.height)
+        fi = max(0, min(len(devs) - 1, self.focus["devices"]))
+        if self.key_mode:  # η επιλεγμένη γραμμή να φαίνεται πάντα
+            top_y = fi * row_h
+            if top_y < self.scroll:
+                self.scroll = top_y
+            elif top_y + row_h > self.scroll + area.height:
+                self.scroll = min(self.max_scroll, top_y + row_h - area.height)
         s.set_clip(area)
         right_w = max(80, S(120))
         for i, d in enumerate(devs):
@@ -605,6 +656,8 @@ class App:
             text(s, ago(d["last_seen"]), (r.right - S(10), r.bottom - S(6)), 12, MUTED, anchor="bottomright")
             name = d["name"]
             self.hits.append((r.clip(area), lambda n=name: self._open(n)))
+            if self.key_mode and i == fi:
+                pygame.draw.rect(s, AMBER, r, width=2, border_radius=S(8))
         s.set_clip(None)
         self._scrollbar(area, len(devs) * row_h)
 
@@ -712,6 +765,43 @@ class SDLOutput:
 
 
 # ---------------------------------------------------------------- ΑΦΗ (evdev)
+class EvdevKeys:
+    """Διαβάζει τα κουμπιά K1/K2/K3 (gpio-keys) ως πλήκτρα UP / ENTER / DOWN."""
+
+    def __init__(self):
+        import queue
+        from evdev import InputDevice, ecodes, list_devices
+        self.ec = ecodes
+        self.q = queue.Queue()
+        wanted = {ecodes.KEY_UP, ecodes.KEY_DOWN, ecodes.KEY_ENTER}
+        self.devs = []
+        for path in list_devices():
+            d = InputDevice(path)
+            caps = d.capabilities()
+            if ecodes.EV_ABS in caps:
+                continue  # η οθόνη αφής
+            if wanted & set(caps.get(ecodes.EV_KEY, [])):
+                self.devs.append(d)
+        if not self.devs:
+            raise RuntimeError("δεν βρέθηκαν κουμπιά (τρέξε ./buttons.sh)")
+        print("Κουμπιά: " + ", ".join(f"{d.name} ({d.path})" for d in self.devs))
+        for d in self.devs:
+            threading.Thread(target=self._run, args=(d,), daemon=True).start()
+
+    def _run(self, dev):
+        ec = self.ec
+        names = {ec.KEY_UP: "up", ec.KEY_DOWN: "down", ec.KEY_ENTER: "select"}
+        if CONFIG["keys_reversed"]:
+            names[ec.KEY_UP], names[ec.KEY_DOWN] = "down", "up"
+        for ev in dev.read_loop():
+            if ev.type == ec.EV_KEY and ev.code in names and ev.value in (0, 1):
+                self.q.put((names[ev.code], ev.value == 1))
+
+    def events(self):
+        while not self.q.empty():
+            yield self.q.get_nowait()
+
+
 class EvdevTouch:
     """Διαβάζει την οθόνη αφής (ADS7846/XPT2046) από το /dev/input και βγάζει
     γεγονότα ("down"|"move"|"up", raw_x, raw_y) σε μια ουρά."""
@@ -1027,6 +1117,11 @@ def main():
             touch = EvdevTouch()
         except Exception as e:  # noqa: BLE001
             print(f"Αφή μη διαθέσιμη: {e}")
+    keys = None
+    try:
+        keys = EvdevKeys()
+    except Exception as e:  # noqa: BLE001
+        print(f"Κουμπιά μη διαθέσιμα: {e}")
 
     if "--touch-test" in sys.argv:
         if not touch:
@@ -1053,6 +1148,7 @@ def main():
     drag_px = max(16, H // 12)  # πόση κίνηση μετράει ως σύρσιμο και όχι πάτημα
 
     def on_down(pos):
+        app.key_mode = False       # αφή: κρύβουμε το περίγραμμα επιλογής
         st.update(down=pos, last_y=pos[1], drag=False)
 
     def on_move(pos):
@@ -1081,6 +1177,39 @@ def main():
         st.update(down=None, drag=False)
         dirty = True
 
+    # ---- κουμπιά: K1/K3 πάνω-κάτω (με επανάληψη όταν κρατιούνται), K2 επιλογή / κράτημα = πίσω
+    held = {}
+    REPEAT_AFTER, REPEAT_EVERY = 0.45, 0.15
+
+    def on_key(action, pressed):
+        nonlocal dirty
+        now = time.time()
+        if pressed:
+            held[action] = {"t": now, "last": now, "fired": False}
+            if action != "select":
+                app.key(action)
+        else:
+            h = held.pop(action, None)
+            if action == "select" and h and not h["fired"]:
+                app.key("select")
+        dirty = True
+
+    def keys_tick():
+        nonlocal dirty
+        now = time.time()
+        for action, h in held.items():
+            if action == "select":
+                if not h["fired"] and now - h["t"] >= CONFIG["long_press"]:
+                    h["fired"] = True
+                    app.key("back")
+                    dirty = True
+            elif now - h["t"] >= REPEAT_AFTER and now - h["last"] >= REPEAT_EVERY:
+                h["last"] = now
+                app.key(action)
+                dirty = True
+
+    sdl_keys = {pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_RETURN: "select"}
+
     running = True
     try:
         while running:
@@ -1089,6 +1218,11 @@ def main():
                     running = False
                 elif e.type == pygame.KEYDOWN and e.key in (pygame.K_ESCAPE, pygame.K_q):
                     running = False
+                elif e.type == pygame.KEYDOWN and e.key == pygame.K_BACKSPACE:
+                    app.key("back")
+                    dirty = True
+                elif e.type in (pygame.KEYDOWN, pygame.KEYUP) and e.key in sdl_keys:
+                    on_key(sdl_keys[e.key], e.type == pygame.KEYDOWN)
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                     on_down(e.pos)
                 elif e.type == pygame.MOUSEMOTION:
@@ -1099,6 +1233,10 @@ def main():
                 for kind, rx, ry in touch.events():
                     pos = raw_to_screen(rx, ry)
                     {"down": on_down, "move": on_move, "up": on_up}[kind](pos)
+            if keys:
+                for action, pressed in keys.events():
+                    on_key(action, pressed)
+            keys_tick()
             if app.tick():
                 dirty = True
             if dirty:
