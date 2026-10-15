@@ -45,6 +45,9 @@ CONFIG = {
     # Coordinator μέσω ser2net (το Pi κάνει γέφυρα USB -> δίκτυο για το Home Assistant)
     "ser2net_port": int(os.getenv("PANEL_SER2NET_PORT", "6638")),
     "coordinator_dev": os.getenv("PANEL_COORDINATOR_DEV", ""),
+    # auto: αν ο coordinator είναι σε αυτό το Pi δείχνει τη γέφυρα ser2net,
+    # αλλιώς την κατάσταση του Zigbee2MQTT μέσω MQTT. local / remote: αναγκαστικά.
+    "coordinator_mode": os.getenv("PANEL_COORDINATOR_MODE", "auto"),
     # Κουμπιά K1/K2/K3 στο πλάι της οθόνης (gpio-key, βλ. buttons.sh)
     "keys_reversed": os.getenv("PANEL_KEYS_REVERSED", "0") == "1",
     "long_press": float(os.getenv("PANEL_LONG_PRESS", "0.7")),
@@ -194,6 +197,9 @@ class SysStats:
             present = os.path.exists(dev)
         else:
             present = os.path.isdir("/dev/serial/by-id") and bool(os.listdir("/dev/serial/by-id"))
+        mode = CONFIG["coordinator_mode"]
+        if mode == "remote" or (not present and mode == "auto" and not dev):
+            return None  # ο coordinator είναι σε άλλο μηχάνημα: δείχνουμε το Zigbee2MQTT
         if not present:
             return "Χωρίς stick", RED
         port = CONFIG["ser2net_port"]
@@ -470,6 +476,14 @@ class App:
             elif action == "down":
                 self.drag(-step)
 
+    def _coord_status(self):
+        if self.sys.coord is not None:
+            return self.sys.coord
+        if not self.zb.mqtt_ok:
+            return "Χωρίς MQTT", RED
+        return {"online": ("Z2M online", GREEN), "offline": ("Z2M offline", RED)}.get(
+            self.zb.bridge, ("Αναμονή", MUTED))
+
     def _focus_ring(self, r):
         pygame.draw.rect(self.screen, AMBER, r.inflate(4, 4), width=2, border_radius=S(12))
 
@@ -563,7 +577,7 @@ class App:
         t = self.sys.temp
         items = [
             ("Θερμοκρασία", f"{t:.0f}°C" if t is not None else "—", level_color((t or 0) * 1.25)),
-            ("Coordinator", self.sys.coord[0], self.sys.coord[1]),
+            ("Coordinator", *self._coord_status()),
             ("IP", self.sys.ip, TEXT),
         ]
         colw = [0.28, 0.32, 0.40]

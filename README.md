@@ -40,6 +40,21 @@ cd zigbee-panel
 
 ## Coordinator
 
+### Σε άλλο Pi (π.χ. Pi 4 με Ethernet)
+
+Στο Pi με το dongle δεν χρειάζεται το `install.sh`, μόνο:
+
+```bash
+git clone https://github.com/<username>/zigbee-panel.git ~/zigbee-panel
+cd ~/zigbee-panel && ./coordinator.sh
+```
+
+Βάλε το dongle σε θύρα USB 2.0 (μαύρη) με καλώδιο προέκτασης. Η οθόνη στο άλλο Pi
+δείχνει τότε στην ένδειξη Coordinator την κατάσταση του Zigbee2MQTT
+(«Z2M online» / «Z2M offline»).
+
+### Στο ίδιο Pi με την οθόνη
+
 Όταν συνδέσεις το USB stick:
 
 ```bash
