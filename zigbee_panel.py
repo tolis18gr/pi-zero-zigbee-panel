@@ -51,6 +51,8 @@ CONFIG = {
     # Κουμπιά K1/K2/K3 στο πλάι της οθόνης (gpio-key, βλ. buttons.sh)
     "keys_reversed": os.getenv("PANEL_KEYS_REVERSED", "0") == "1",
     "long_press": float(os.getenv("PANEL_LONG_PRESS", "0.7")),
+    # Μαύρισμα οθόνης μετά από τόσα δευτερόλεπτα χωρίς χρήση (0 = ποτέ)
+    "screen_timeout": float(os.getenv("PANEL_SCREEN_TIMEOUT", "300")),
     # Βαθμονόμηση αφής (γράφεται αυτόματα από: python3 zigbee_panel.py --calibrate)
     "touch_swap": os.getenv("PANEL_TOUCH_SWAP", "0") == "1",
     "touch_x_min": float(os.getenv("PANEL_TOUCH_X_MIN", "0")),
@@ -1167,14 +1169,32 @@ def main():
 
     drag_px = max(16, H // 12)  # πόση κίνηση μετράει ως σύρσιμο και όχι πάτημα
 
+    # ---- μαύρισμα οθόνης: το πρώτο άγγιγμα/κουμπί μόνο την ξυπνάει
+    sleep = {"asleep": False, "last": time.time(), "swallow_touch": False,
+             "swallow_keys": set(), "bridge": None}
+
+    def wake_or_activity():
+        """True αν η ενέργεια χρησιμοποιήθηκε μόνο για να ξυπνήσει η οθόνη."""
+        nonlocal dirty
+        sleep["last"] = time.time()
+        if sleep["asleep"]:
+            sleep["asleep"] = False
+            dirty = True
+            return True
+        return False
+
     def on_down(pos):
+        if wake_or_activity():
+            sleep["swallow_touch"] = True
+            return
         app.key_mode = False       # αφή: κρύβουμε το περίγραμμα επιλογής
         st.update(down=pos, last_y=pos[1], drag=False)
 
     def on_move(pos):
         nonlocal dirty
-        if not st["down"]:
+        if sleep["swallow_touch"] or not st["down"]:
             return
+        sleep["last"] = time.time()
         if not st["drag"] and abs(pos[1] - st["down"][1]) > drag_px:
             st["drag"] = True
             st["last_y"] = pos[1]
@@ -1185,6 +1205,10 @@ def main():
 
     def on_up(pos):
         nonlocal dirty
+        if sleep["swallow_touch"]:
+            sleep["swallow_touch"] = False
+            st.update(down=None, drag=False)
+            return
         if st["down"]:
             dx, dy = pos[0] - st["down"][0], pos[1] - st["down"][1]
             if dx > W // 4 and abs(dy) < dx / 2:   # σύρσιμο προς τα δεξιά = πίσω
@@ -1204,6 +1228,12 @@ def main():
     def on_key(action, pressed):
         nonlocal dirty
         now = time.time()
+        if pressed and wake_or_activity():
+            sleep["swallow_keys"].add(action)   # αγνοούμε αυτό το πάτημα μέχρι να αφεθεί
+            return
+        if not pressed and action in sleep["swallow_keys"]:
+            sleep["swallow_keys"].discard(action)
+            return
         if pressed:
             held[action] = {"t": now, "last": now, "fired": False}
             if action != "select":
@@ -1256,6 +1286,24 @@ def main():
             if keys:
                 for action, pressed in keys.events():
                     on_key(action, pressed)
+            # αν το Zigbee2MQTT πέσει ενώ η οθόνη είναι σβηστή, ξυπνάμε για να φανεί
+            br = app.zb.bridge
+            if sleep["asleep"] and br == "offline" and sleep["bridge"] != "offline":
+                wake_or_activity()
+            sleep["bridge"] = br
+
+            timeout = CONFIG["screen_timeout"]
+            if (not sleep["asleep"] and timeout > 0 and not held
+                    and time.time() - sleep["last"] > timeout):
+                sleep["asleep"] = True
+                app.key_mode = False
+                out.surface.fill((0, 0, 0))
+                out.present()
+
+            if sleep["asleep"]:
+                clock.tick(10)   # σβηστή οθόνη: τίποτα δεν ξανασχεδιάζεται
+                continue
+
             keys_tick()
             if app.tick():
                 dirty = True
